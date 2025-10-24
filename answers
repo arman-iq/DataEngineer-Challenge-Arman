@@ -1,1 +1,171 @@
+Question 1: Create a query that calculates the average number of goals per game between 1900 and 2000.
+
+SELECT AVG (home_score + away_score) AS Avg_Goals_Per_Game
+FROM results
+WHERE date BETWEEN '1900-01-01' AND '2000-12-31';
+
+Question 2: Create a query that counts the number of shootouts wins by country and arrange in alphabetical order.
+
+SELECT winner as country,
+COUNT(*) AS shootout_wins 
+FROM shootouts
+GROUP BY winner
+ORDER BY country;
+
+Question 3: Create a reliable key that allows the joining together of goal scorers, results, and shootouts.
+
+SELECT 
+REPLACE(date, '-', '') || '_' || substr(home_team, 1,3) || '_' || substr(away_team, 1,3) AS match_key, -- XXXXZZYY_AAA_AAA
+date,
+home_team,
+away_team
+FROM shootouts;
+
+Question 4: Create a query that identifies which teams have won a penalty shootout after a 1-1 draw.
+
+SELECT
+r.date,
+r.home_team,
+r.away_team,
+r.home_score || '-' || r.away_score AS score, -- score format, 1-1
+s.winner AS shootout_winner
+FROM results r
+JOIN shootouts s
+ON r.date = s.date
+AND r.home_team = s.home_team
+AND r.away_team = s.away_team
+WHERE r.home_score = 1
+AND r.away_score = 1
+ORDER BY r.date; -- earliest date
+
+Question 5: Create a query that identifies the top goal scorer by tournament, and what percentage that equates to for all goals scored in the tournament.
+
+-- only tournaments with scorer data appear
+WITH g AS (
+  SELECT
+    r.tournament,
+    gs.scorer,  -- goals scored
+    COUNT(*) AS goals  -- total goals scored by that player
+  FROM goalscorers gs
+  JOIN results r  
+    ON gs.date = r.date
+   AND gs.home_team = r.home_team
+   AND gs.away_team = r.away_team
+  WHERE COALESCE(LOWER(TRIM(CAST(gs.own_goal AS CHAR))), '0') NOT IN ('1','true','t','yes','y')   -- remove any own-goals from scorers as it wouldn't be a "real goal"
+    AND gs.scorer IS NOT NULL AND TRIM(gs.scorer) <> ''  -- ignore missing scorer names
+  GROUP BY r.tournament, gs.scorer
+),
+tournament_totals AS (  -- all goals including own-goals this time
+  SELECT
+    tournament,
+    SUM(home_score + away_score) AS total_goals  -- total goals in each tournament
+  FROM results
+  GROUP BY tournament
+),
+ranked AS (
+  SELECT
+    g.*,
+    tt.total_goals,  -- join total goals for percentage calc
+    DENSE_RANK() OVER (PARTITION BY tournament ORDER BY goals DESC) AS rnk  -- rank scorers
+  FROM g
+  JOIN tournament_totals tt USING (tournament)
+)
+-- show top scorers and their % of total goals
+SELECT
+  tournament,
+  scorer       AS top_scorer,
+  goals        AS goals_scored,
+  total_goals,
+  ROUND(100.0 * goals / NULLIF(total_goals, 0), 2) AS percent_of_total  -- % of total
+FROM ranked
+WHERE rnk = 1
+ORDER BY tournament, top_scorer;  -- include top scorer as well, for more than 1 play_
+
+
+
+
+Additional Question 1: Create and additional column that flags records with data quality issues
+
+# Additional #1
+import pandas as pd
+
+# csv file paths + key columns
+datasets = {
+    "/Lilly/results.csv": ["date", "home_team", "away_team", "home_score", "away_score", "tournament", "city", "country", "neutral"],
+    "/Lilly/goalscorers.csv": ["date", "home_team", "away_team", "team", "scorer", "minute", "own_goal", "penalty"],
+    "/Lilly/shootouts.csv": ["date", "home_team", "away_team", "winner", "first_shooter"]
+}
+
+# check each dataset
+for file, cols in datasets.items():
+    print(f"{file}...")
+    
+    # load csv and treat "NA", "NULL", "NONE", etc as missing
+    df = pd.read_csv(file, na_values=["NA", "NaN", "N/A", "NULL","NONE", " "])
+    
+    # add new column to flag missing values
+    df["data_quality_issue"] = df[cols].isna().any(axis=1)
+    
+    # filter only rows with issues
+    bad_rows = df[df["data_quality_issue"] == True]
+    
+    # show results
+    if len(bad_rows) > 0:
+        print(f"{len(bad_rows)} rows have data quality issues.")
+        print(bad_rows.head(15))  # show 15 rows
+    else:
+        print("0 rows have data quality issues.")
+
+
+
+Additional Question 2: Resolve the identified quality issues
+
+
+# Additional #2 
+import pandas as pd
+
+# csv files/paths + columns
+datasets = {
+    "/Lilly/results.csv": ["date","home_team","away_team","home_score","away_score","tournament","city","country","neutral"],
+    "/Lilly/goalscorers.csv": ["date","home_team","away_team","team","scorer","minute","own_goal","penalty"],
+    "/Lilly/shootouts.csv": ["date","home_team","away_team","winner","first_shooter"]
+}
+
+# loop through each dataset
+for file, cols in datasets.items():
+    print(f"{file}...")
+
+    # load csv, determine these values as missing
+    df = pd.read_csv(file, na_values=["NA","NaN","N/A","NULL","NONE"," "])
+    
+    # check how many rows have issues before cleaning
+    flag_cols = [c for c in cols if c in df.columns]
+    before_mask = df[flag_cols].isna().any(axis=1)
+    num_issues_before = int(before_mask.sum())
+    print(f"Before cleaning: {num_issues_before} rows with issues.")
+
+    # if clean then skip
+    if num_issues_before == 0:
+        print("No data quality issues found.")
+        continue
+
+    # fill missing text columns with 'Unknown'
+    text_cols = [c for c in flag_cols if df[c].dtype == "object"]
+    if text_cols:
+        df[text_cols] = df[text_cols].fillna("Unknown")
+
+    # fix numeric columns (replace missing or invalid with -1)
+    for num_col in ["home_score", "away_score", "minute"]: # convert these columns to numbers
+        if num_col in flag_cols:
+            df[num_col] = pd.to_numeric(df[num_col], errors="coerce").fillna(-1) # if cannot be converted, mark as missing and fill with -1
+    if "minute" in flag_cols:
+        df.loc[(df["minute"] < -1) | (df["minute"] > 125), "minute"] = -1 # 125 minutes, matches rarely exceed 125 mins
+
+    # re-flag and show only rows that had issues before (cleaned now)
+    after_mask = df[flag_cols].isna().any(axis=1)
+    print(f"After cleaning: {after_mask.sum()} rows with issues.")
+
+    print(df.loc[before_mask, flag_cols].head(25)) # shows 25 rows
+
+
 
